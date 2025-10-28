@@ -1,0 +1,33 @@
+# Python Requirements for ESP-IDF Build
+# Install these packages in the ESP-IDF Python environment
+
+# Core build requirements
+packaging>=20.0
+click>=7.0
+pyparsing>=2.3.1
+pyserial>=3.3
+cryptography>=2.1.4
+setuptools>=21
+
+# ESP-IDF specific tools
+kconfiglib==14.1.0
+construct==2.10.70
+pyelftools>=0.27
+esptool>=4.0
+idf-component-manager>=2.2
+esp-idf-monitor>=1.0
+esp-coredump>=1.0
+esp-idf-panic-decoder>=1.0
+freertos-gdb>=1.0
+pyclang>=0.3
+esp-idf-kconfig>=3.0
+esp-idf-nvs-partition-gen>=0.1
+esp-idf-size>=1.0
+esp-idf-diag>=0.1
+psutil>=5.7.0
+tree-sitter>=0.20.0
+tree-sitter-c>=0.20.0
+
+# Additional dependencies
+pyyaml>=5.1
+rich>=10.0
