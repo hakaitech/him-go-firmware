@@ -220,9 +220,46 @@ esp_err_t sign_message(const char *message, size_t message_len,
 
 esp_err_t verify_signature(const char *message, size_t message_len,
                            const char *signature, const char *pub_key_pem) {
-    // Implementation for signature verification
-    // This would parse the public key and verify the signature
-    ESP_LOGI(TAG, "Verifying signature (stub)");
+    ESP_LOGI(TAG, "Verifying signature");
+    
+    // Parse public key
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+    
+    int ret = mbedtls_pk_parse_public_key(&pk, (unsigned char *)pub_key_pem,
+                                           strlen(pub_key_pem) + 1);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Failed to parse public key: -0x%04x", -ret);
+        mbedtls_pk_free(&pk);
+        return ESP_FAIL;
+    }
+    
+    // Decode signature from base64
+    unsigned char sig_buf[MBEDTLS_MPI_MAX_SIZE];
+    size_t sig_len = 0;
+    ret = mbedtls_base64_decode(sig_buf, sizeof(sig_buf), &sig_len,
+                                 (unsigned char *)signature, strlen(signature));
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Failed to decode signature: -0x%04x", -ret);
+        mbedtls_pk_free(&pk);
+        return ESP_FAIL;
+    }
+    
+    // Hash the message
+    unsigned char hash[32];
+    mbedtls_sha256((unsigned char *)message, message_len, hash, 0);
+    
+    // Verify signature
+    ret = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, hash, 32, sig_buf, sig_len);
+    
+    mbedtls_pk_free(&pk);
+    
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Signature verification failed: -0x%04x", -ret);
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGI(TAG, "Signature verified successfully");
     return ESP_OK;
 }
 
@@ -292,18 +329,151 @@ esp_err_t encrypt_aes_gcm(const char *plaintext, size_t plaintext_len,
 esp_err_t decrypt_aes_gcm(const char *ciphertext,
                          const uint8_t *shared_secret,
                          char *out_plaintext, size_t out_plaintext_len) {
-    ESP_LOGI(TAG, "Decrypting with AES-GCM (stub)");
-    // Similar to encrypt but in reverse
+    ESP_LOGI(TAG, "Decrypting with AES-GCM");
+    
+    // Decode base64 ciphertext
+    unsigned char *decoded_buf = malloc(strlen(ciphertext));
+    if (!decoded_buf) {
+        return ESP_FAIL;
+    }
+    
+    size_t decoded_len = 0;
+    int ret = mbedtls_base64_decode(decoded_buf, strlen(ciphertext), &decoded_len,
+                                     (unsigned char *)ciphertext, strlen(ciphertext));
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Failed to decode ciphertext: -0x%04x", -ret);
+        free(decoded_buf);
+        return ESP_FAIL;
+    }
+    
+    // Extract IV (12 bytes), ciphertext, and tag (16 bytes)
+    if (decoded_len < 28) {
+        ESP_LOGE(TAG, "Ciphertext too short");
+        free(decoded_buf);
+        return ESP_FAIL;
+    }
+    
+    unsigned char *iv = decoded_buf;
+    unsigned char *ct = decoded_buf + 12;
+    size_t ct_len = decoded_len - 28;
+    unsigned char *tag = decoded_buf + 12 + ct_len;
+    
+    // Initialize GCM context
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    
+    ret = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, shared_secret, 256);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Failed to set GCM key: -0x%04x", -ret);
+        mbedtls_gcm_free(&gcm);
+        free(decoded_buf);
+        return ESP_FAIL;
+    }
+    
+    // Decrypt and verify
+    ret = mbedtls_gcm_auth_decrypt(&gcm, ct_len, iv, 12, NULL, 0,
+                                    tag, 16, ct, (unsigned char *)out_plaintext);
+    
+    mbedtls_gcm_free(&gcm);
+    free(decoded_buf);
+    
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Failed to decrypt: -0x%04x", -ret);
+        return ESP_FAIL;
+    }
+    
+    out_plaintext[ct_len] = '\0';
     return ESP_OK;
 }
 
 esp_err_t generate_shared_secret(const char *their_pub_key_pem,
                                  uint8_t *out_secret) {
-    ESP_LOGI(TAG, "Generating shared secret via ECDH (stub)");
-    // This would perform ECDH key exchange
-    // For now, just fill with some data
-    esp_fill_random(out_secret, 32);
-    return ESP_OK;
+    ESP_LOGI(TAG, "Generating shared secret via ECDH");
+    
+    // Load our private key
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open("himitsu", NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS");
+        return ESP_FAIL;
+    }
+    
+    size_t privkey_len = 0;
+    err = nvs_get_blob(nvs_handle, "private_key", NULL, &privkey_len);
+    if (err != ESP_OK) {
+        nvs_close(nvs_handle);
+        return ESP_FAIL;
+    }
+    
+    unsigned char *privkey_buf = malloc(privkey_len);
+    if (!privkey_buf) {
+        nvs_close(nvs_handle);
+        return ESP_FAIL;
+    }
+    
+    err = nvs_get_blob(nvs_handle, "private_key", privkey_buf, &privkey_len);
+    nvs_close(nvs_handle);
+    
+    if (err != ESP_OK) {
+        free(privkey_buf);
+        return ESP_FAIL;
+    }
+    
+    // Parse our private key
+    mbedtls_pk_context our_key;
+    mbedtls_pk_init(&our_key);
+    
+    int ret = mbedtls_pk_parse_key(&our_key, privkey_buf, privkey_len, NULL, 0, NULL, NULL);
+    free(privkey_buf);
+    
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Failed to parse our private key: -0x%04x", -ret);
+        mbedtls_pk_free(&our_key);
+        return ESP_FAIL;
+    }
+    
+    // Parse their public key
+    mbedtls_pk_context their_key;
+    mbedtls_pk_init(&their_key);
+    
+    ret = mbedtls_pk_parse_public_key(&their_key, (unsigned char *)their_pub_key_pem,
+                                       strlen(their_pub_key_pem) + 1);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Failed to parse their public key: -0x%04x", -ret);
+        mbedtls_pk_free(&our_key);
+        mbedtls_pk_free(&their_key);
+        return ESP_FAIL;
+    }
+    
+    // Perform ECDH
+    mbedtls_ecdh_context ecdh;
+    mbedtls_ecdh_init(&ecdh);
+    
+    ret = mbedtls_ecdh_get_params(&ecdh, mbedtls_pk_ec(our_key), MBEDTLS_ECDH_OURS);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Failed to get our params: -0x%04x", -ret);
+        goto cleanup;
+    }
+    
+    ret = mbedtls_ecdh_get_params(&ecdh, mbedtls_pk_ec(their_key), MBEDTLS_ECDH_THEIRS);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Failed to get their params: -0x%04x", -ret);
+        goto cleanup;
+    }
+    
+    size_t olen = 0;
+    ret = mbedtls_ecdh_calc_secret(&ecdh, &olen, out_secret, 32, NULL, NULL);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Failed to calculate shared secret: -0x%04x", -ret);
+        goto cleanup;
+    }
+    
+cleanup:
+    mbedtls_ecdh_free(&ecdh);
+    mbedtls_pk_free(&our_key);
+    mbedtls_pk_free(&their_key);
+    
+    return (ret == 0) ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t get_public_key_pem(char *out_pem, size_t out_pem_len) {

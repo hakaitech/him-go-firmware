@@ -3,6 +3,7 @@
 #include "esp_http_client.h"
 #include "mqtt_client.h"
 #include "freertos/queue.h"
+#include "nvs.h"
 
 static const char *TAG = "HIMITSU_CLIENT";
 
@@ -14,32 +15,146 @@ static QueueHandle_t rx_message_queue = NULL;
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 
 esp_err_t register_identity(const char *hash, const char *pub_key_pem) {
-    ESP_LOGI(TAG, "Registering identity: %s (stub)", hash);
+    ESP_LOGI(TAG, "Registering identity: %s", hash);
     
-    // This would make an HTTP POST to /register
-    // with JSON body: {"hash": "...", "pub_key": "..."}
+    esp_http_client_config_t config = {
+        .url = CENTRAL_SERVER_URL "/register",
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = 5000,
+    };
     
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGE(TAG, "Failed to initialize HTTP client");
+        return ESP_FAIL;
+    }
+    
+    // Prepare JSON body
+    char *json_data = malloc(strlen(hash) + strlen(pub_key_pem) + 100);
+    if (!json_data) {
+        esp_http_client_cleanup(client);
+        return ESP_FAIL;
+    }
+    
+    snprintf(json_data, strlen(hash) + strlen(pub_key_pem) + 100,
+             "{\"hash\":\"%s\",\"pub_key\":\"%s\"}", hash, pub_key_pem);
+    
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, json_data, strlen(json_data));
+    
+    esp_err_t err = esp_http_client_perform(client);
+    int status_code = esp_http_client_get_status_code(client);
+    
+    free(json_data);
+    esp_http_client_cleanup(client);
+    
+    if (err != ESP_OK || status_code != 200) {
+        ESP_LOGE(TAG, "Registration failed: %s, status: %d", esp_err_to_name(err), status_code);
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGI(TAG, "Identity registered successfully");
     return ESP_OK;
 }
 
 esp_err_t dispose_identity(void) {
-    ESP_LOGI(TAG, "Disposing identity (stub)");
+    ESP_LOGI(TAG, "Disposing identity");
     
-    // This would make an HTTP POST to /dispose
-    // with signed request
+    // Get our identity hash
+    nvs_handle_t nvs_handle;
+    char identity_hash[11] = {0};
     
+    if (nvs_open("himitsu", NVS_READONLY, &nvs_handle) == ESP_OK) {
+        size_t len = sizeof(identity_hash);
+        nvs_get_str(nvs_handle, "identity_hash", identity_hash, &len);
+        nvs_close(nvs_handle);
+    }
+    
+    esp_http_client_config_t config = {
+        .url = CENTRAL_SERVER_URL "/dispose",
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = 5000,
+    };
+    
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGE(TAG, "Failed to initialize HTTP client");
+        return ESP_FAIL;
+    }
+    
+    // Prepare JSON body with identity hash
+    char json_data[128];
+    snprintf(json_data, sizeof(json_data), "{\"hash\":\"%s\"}", identity_hash);
+    
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, json_data, strlen(json_data));
+    
+    esp_err_t err = esp_http_client_perform(client);
+    int status_code = esp_http_client_get_status_code(client);
+    
+    esp_http_client_cleanup(client);
+    
+    if (err != ESP_OK || status_code != 200) {
+        ESP_LOGE(TAG, "Disposal failed: %s, status: %d", esp_err_to_name(err), status_code);
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGI(TAG, "Identity disposed on server");
     return ESP_OK;
 }
 
 esp_err_t get_pub_key(const char *hash, char *out_pub_key_pem, size_t out_pub_key_pem_len) {
-    ESP_LOGI(TAG, "Getting public key for: %s (stub)", hash);
+    ESP_LOGI(TAG, "Getting public key for: %s", hash);
     
-    // This would make an HTTP GET to /get_pub_key?hash=...
-    // For now, return a stub response
+    char url[256];
+    snprintf(url, sizeof(url), CENTRAL_SERVER_URL "/get_pub_key?hash=%s", hash);
     
-    snprintf(out_pub_key_pem, out_pub_key_pem_len, "-----BEGIN PUBLIC KEY-----\nSTUB\n-----END PUBLIC KEY-----\n");
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_GET,
+        .timeout_ms = 5000,
+    };
     
-    return ESP_OK;
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGE(TAG, "Failed to initialize HTTP client");
+        return ESP_FAIL;
+    }
+    
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open connection: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return ESP_FAIL;
+    }
+    
+    int content_length = esp_http_client_fetch_headers(client);
+    int status_code = esp_http_client_get_status_code(client);
+    
+    if (status_code == 404) {
+        ESP_LOGE(TAG, "Public key not found for hash: %s", hash);
+        esp_http_client_cleanup(client);
+        return ESP_FAIL;
+    }
+    
+    if (status_code != 200 || content_length <= 0) {
+        ESP_LOGE(TAG, "Failed to get public key, status: %d", status_code);
+        esp_http_client_cleanup(client);
+        return ESP_FAIL;
+    }
+    
+    int read_len = esp_http_client_read(client, out_pub_key_pem, 
+                                         out_pub_key_pem_len - 1);
+    esp_http_client_cleanup(client);
+    
+    if (read_len > 0) {
+        out_pub_key_pem[read_len] = '\0';
+        ESP_LOGI(TAG, "Retrieved public key successfully");
+        return ESP_OK;
+    }
+    
+    ESP_LOGE(TAG, "Failed to read public key data");
+    return ESP_FAIL;
 }
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, 
