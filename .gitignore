@@ -1,0 +1,24 @@
+# Build artifacts
+build/
+sdkconfig
+sdkconfig.old
+*.o
+*.a
+*.elf
+*.bin
+*.map
+
+# Dependencies
+dependencies.lock
+managed_components/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
